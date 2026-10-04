@@ -3,3 +3,4 @@ SQLAlchemy
 pandas
 requests
 python-dotenv
+beautifulsoup4

@@ -9,6 +9,7 @@ def clean_price(price_str):
     if price_str is None or price_str == "": 
         return "N/A" 
      
+    # Clean the text and extract the first number containing thousands separators or decimal digits
     s = str(price_str).replace(',', '') 
     match = re.search(r'\d+(?:\.\d+)?', s) 
     if match: 
@@ -22,31 +23,38 @@ def clean_price(price_str):
     return "N/A" 
  
 def scrape_amazon(url): 
-    """Scrape Amazon prices with high flexibility to prevent N/A results""" 
+    """Scrape Amazon prices while forcing the server to fetch the local currency in EGP and avoiding USD conversions""" 
+     
+    # Force Amazon to return prices in Egyptian Pound (EGP) and use the local version
     headers = { 
         "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8", 
-        "accept-language": "en-US,en;q=0.9,ar;q=0.8", 
+        "accept-language": "ar-EG,ar;q=0.9,en-US;q=0.8,en;q=0.7", 
         "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36" 
+    } 
+ 
+    # Add cookies to ensure the Egyptian Pound (EGP) currency is selected
+    cookies = { 
+        "i18n-prefs": "EGP", 
+        "lc-main": "ar_AE" if "amazon.eg" in url else "en_US" 
     } 
  
     for attempt in range(3): 
         try: 
             time.sleep(random.uniform(1.0, 2.5)) 
             session = curl_requests.Session(impersonate="chrome120") 
-            res = session.get(url, headers=headers, timeout=15) 
+            res = session.get(url, headers=headers, cookies=cookies, timeout=15) 
              
             if res.status_code == 200: 
                 soup = BeautifulSoup(res.text, 'html.parser') 
                  
+                # Critical order starting with the complete final price (Price to pay)
                 amazon_selectors = [ 
-                    'span.a-price span.a-offscreen', 
                     '#corePrice_feature_div span.a-offscreen', 
                     '#corePriceDisplay_desktop_feature_div span.a-offscreen', 
-                    '#priceblock_ourprice', 
-                    '#priceblock_dealprice', 
                     '.apexPriceToPay span.a-offscreen', 
-                    'span.a-price-whole', 
-                    '.a-price .a-offscreen' 
+                    'span.a-price span.a-offscreen', 
+                    '#priceblock_ourprice', 
+                    '#priceblock_dealprice' 
                 ] 
                  
                 for sel in amazon_selectors: 
@@ -55,7 +63,8 @@ def scrape_amazon(url):
                         p = clean_price(elem.get_text()) 
                         if p != "N/A": 
                             return p 
-                             
+ 
+                # Fallback attempt: search inside the itemprop="price" tag
                 prop_elem = soup.select_one('[itemprop="price"]') 
                 if prop_elem: 
                     p = clean_price(prop_elem.get('content', prop_elem.get_text())) 

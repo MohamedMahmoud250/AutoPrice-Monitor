@@ -1,15 +1,13 @@
 import re 
-import json 
 import time 
-import random 
 from bs4 import BeautifulSoup 
-from curl_cffi import requests as curl_requests 
+from playwright.sync_api import sync_playwright 
  
 def clean_price(price_str): 
     if price_str is None or price_str == "": 
         return "N/A" 
      
-    # Clean the text and extract the first number containing thousands separators or decimal digits
+    # Clean the text and extract the number
     s = str(price_str).replace(',', '') 
     match = re.search(r'\d+(?:\.\d+)?', s) 
     if match: 
@@ -22,33 +20,40 @@ def clean_price(price_str):
              
     return "N/A" 
  
-def scrape_amazon(url): 
-    """Scrape Amazon prices while forcing the server to fetch the local currency in EGP and avoiding USD conversions""" 
-     
-    # Force Amazon to return prices in Egyptian Pound (EGP) and use the local version
-    headers = { 
-        "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8", 
-        "accept-language": "ar-EG,ar;q=0.9,en-US;q=0.8,en;q=0.7", 
-        "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36" 
-    } 
- 
-    # Add cookies to ensure the Egyptian Pound (EGP) currency is selected
-    cookies = { 
-        "i18n-prefs": "EGP", 
-        "lc-main": "ar_AE" if "amazon.eg" in url else "en_US" 
-    } 
- 
-    for attempt in range(3): 
-        try: 
-            time.sleep(random.uniform(1.0, 2.5)) 
-            session = curl_requests.Session(impersonate="chrome120") 
-            res = session.get(url, headers=headers, cookies=cookies, timeout=15) 
+def scrape_with_playwright(url): 
+    """Open a real browser simulation to bypass blocking and wait for prices to fully load""" 
+    try: 
+        with sync_playwright() as p: 
+            # Launch a hidden browser (Headless)
+            browser = p.chromium.launch( 
+                headless=True, 
+                args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"] 
+            ) 
              
-            if res.status_code == 200: 
-                soup = BeautifulSoup(res.text, 'html.parser') 
-                 
-                # Critical order starting with the complete final price (Price to pay)
-                amazon_selectors = [ 
+            # Open the page with Arabic language and local region settings
+            context = browser.new_context( 
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36", 
+                locale="ar-EG", 
+                extra_http_headers={"Accept-Language": "ar-EG,ar;q=0.9,en-US;q=0.8"} 
+            ) 
+             
+            page = context.new_page() 
+             
+            # Navigate to the URL and wait for the DOM content to load
+            page.goto(url, timeout=30000, wait_until="domcontentloaded") 
+            time.sleep(3)  # Give JavaScript 3 seconds to load the final price
+             
+            content = page.content() 
+            browser.close() 
+             
+            soup = BeautifulSoup(content, 'html.parser') 
+             
+            # Determine price elements based on the store
+            u = url.lower() 
+            selectors = [] 
+             
+            if 'amazon' in u: 
+                selectors = [ 
                     '#corePrice_feature_div span.a-offscreen', 
                     '#corePriceDisplay_desktop_feature_div span.a-offscreen', 
                     '.apexPriceToPay span.a-offscreen', 
@@ -56,101 +61,42 @@ def scrape_amazon(url):
                     '#priceblock_ourprice', 
                     '#priceblock_dealprice' 
                 ] 
-                 
-                for sel in amazon_selectors: 
-                    elem = soup.select_one(sel) 
-                    if elem: 
-                        p = clean_price(elem.get_text()) 
-                        if p != "N/A": 
-                            return p 
- 
-                # Fallback attempt: search inside the itemprop="price" tag
-                prop_elem = soup.select_one('[itemprop="price"]') 
-                if prop_elem: 
-                    p = clean_price(prop_elem.get('content', prop_elem.get_text())) 
-                    if p != "N/A": 
-                        return p 
- 
-        except Exception as e: 
-            print(f"Amazon Scrape Attempt {attempt+1} Error: {e}") 
- 
-    return "N/A" 
- 
-def scrape_noon_special(url): 
-    """Scrape Noon prices""" 
-    headers = { 
-        "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", 
-        "accept-language": "ar-EG,ar;q=0.9,en-US;q=0.8", 
-        "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" 
-    } 
- 
-    for attempt in range(3): 
-        try: 
-            time.sleep(random.uniform(1.0, 2.0)) 
-            session = curl_requests.Session(impersonate="chrome120") 
-            response = session.get(url, headers=headers, timeout=15) 
-             
-            if response.status_code == 200: 
-                soup = BeautifulSoup(response.text, 'html.parser') 
-                 
+            elif 'noon' in u: 
                 selectors = [ 
                     '[data-qa="product-price"]', 
                     '.priceNow', 
                     '.p-price', 
                     'span.price' 
                 ] 
-                for sel in selectors: 
-                    elem = soup.select_one(sel) 
-                    if elem: 
-                        p = clean_price(elem.get_text()) 
-                        if p != "N/A": 
-                            return p 
+            elif 'jumia' in u: 
+                selectors = [ 
+                    'span.-b.-ltr.-tal.-prsm', 
+                    'span.-b.-ltr.-tal.-fs24', 
+                    '.prc' 
+                ] 
+            else: 
+                selectors = ['.price', '.product-price', '[itemprop="price"]'] 
  
-                next_data = soup.find('script', id='__NEXT_DATA__') 
-                if next_data and next_data.string: 
-                    price_matches = re.findall(r'"sale_price"\s*:\s*([\d\.]+)|"price"\s*:\s*([\d\.]+)', next_data.string) 
-                    for match in price_matches: 
-                        for p in match: 
-                            if p: 
-                                price_clean = clean_price(p) 
-                                if price_clean != "N/A": 
-                                    return price_clean 
-        except Exception as e: 
-            print(f"Noon Scrape Error: {e}") 
+            for sel in selectors: 
+                elem = soup.select_one(sel) 
+                if elem: 
+                    p = clean_price(elem.get_text()) 
+                    if p != "N/A": 
+                        return p 
  
-    return "N/A" 
+            # Fallback attempt to search for itemprop="price"
+            prop_elem = soup.select_one('[itemprop="price"]') 
+            if prop_elem: 
+                p = clean_price(prop_elem.get('content', prop_elem.get_text())) 
+                if p != "N/A": 
+                    return p 
  
-def scrape_jumia(url): 
-    headers = {"accept-language": "en-US,en;q=0.9,ar;q=0.8"} 
-    for attempt in range(3): 
-        try: 
-            time.sleep(random.uniform(1.0, 2.0)) 
-            session = curl_requests.Session(impersonate="chrome120") 
-            res = session.get(url, headers=headers, timeout=15) 
-             
-            if res.status_code == 200: 
-                soup = BeautifulSoup(res.text, 'html.parser') 
-                selectors = ['span.-b.-ltr.-tal.-prsm', 'span.-b.-ltr.-tal.-fs24', '.prc'] 
-                for sel in selectors: 
-                    elem = soup.select_one(sel) 
-                    if elem: 
-                        p = clean_price(elem.get_text()) 
-                        if p != "N/A": 
-                            return p 
-        except Exception as e: 
-            print(f"Jumia Scrape Error: {e}") 
+    except Exception as e: 
+        print(f"Playwright Scrape Error for {url}: {e}") 
  
     return "N/A" 
  
 def get_product_price(url): 
     if not url or not isinstance(url, str): 
         return "N/A" 
-     
-    u = url.lower() 
-    if 'noon' in u: 
-        return scrape_noon_special(url) 
-    elif 'amazon' in u: 
-        return scrape_amazon(url) 
-    elif 'jumia' in u: 
-        return scrape_jumia(url) 
-    return "N/A"
+    return scrape_with_playwright(url)

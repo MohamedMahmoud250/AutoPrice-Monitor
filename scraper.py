@@ -9,7 +9,6 @@ def clean_price(price_str):
     if price_str is None or price_str == "":
         return "N/A"
     
-    # تنظيف الأرقام
     text = str(price_str).replace(',', '').replace('\xa0', ' ')
     match = re.search(r'\d+(?:\.\d+)?', text)
     if match:
@@ -22,54 +21,63 @@ def clean_price(price_str):
     return "N/A"
 
 def scrape_amazon(url):
+    # إضافة برامتر للجوالة والدولة في الرابط نفسه لمنع التحويل للدولار
+    clean_url = url.split('?')[0] + "?language=ar_AE&currency=EGP"
+
     headers = {
         "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "accept-language": "ar-EG,ar;q=0.9",
+        "accept-language": "ar-EG,ar;q=0.9,en-US;q=0.8",
         "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
     }
 
+    # ضبط كوكيز أمازون مصر إجبارياً
     cookies = {
         "i18n-prefs": "EGP",
-        "lc-main": "ar_AE"
+        "lc-main": "ar_AE",
+        "session-id-time": "2082787201l"
     }
 
     for attempt in range(3):
         try:
             time.sleep(random.uniform(1.0, 2.0))
             session = curl_requests.Session(impersonate="chrome120")
-            res = session.get(url, headers=headers, cookies=cookies, timeout=15)
+            res = session.get(clean_url, headers=headers, cookies=cookies, timeout=15)
             
             if res.status_code == 200:
                 soup = BeautifulSoup(res.text, 'html.parser')
                 
-                # 1. البحث في بيانات JSON-LD المبسطة المخفية في الكود
+                # 1. البحث عن السعر داخل عناصر EGP المباشرة في الصفحة
+                price_elements = soup.select('.a-price .a-offscreen')
+                for elem in price_elements:
+                    txt = elem.get_text()
+                    # التأكد أن السعر بالجنيه أو رقم كبير منطقي
+                    p = clean_price(txt)
+                    if p != "N/A":
+                        val = float(p)
+                        # لو الرقم صغير جداً (زي 1500 في لابتوب) يبقى ده دولار اترفض!
+                        if 'جنيه' in txt or 'EGP' in txt or val > 3000:
+                            return f"{val:.2f}"
+
+                # 2. البحث في JSON-LD مع التأكد من العملة EGP
                 json_scripts = soup.find_all('script', type='application/ld+json')
                 for script in json_scripts:
                     if script.string:
                         try:
                             data = json.loads(script.string)
-                            # التعامل مع الهياكل المختلفة للـ JSON
-                            if isinstance(data, list):
-                                data = data[0]
-                            
+                            if isinstance(data, list): data = data[0]
                             offers = data.get('offers')
                             if offers:
-                                if isinstance(offers, list):
-                                    offers = offers[0]
+                                if isinstance(offers, list): offers = offers[0]
+                                currency = offers.get('priceCurrency', '')
                                 price = offers.get('price')
                                 if price:
                                     p = clean_price(price)
                                     if p != "N/A":
-                                        return p
+                                        val = float(p)
+                                        if currency == 'EGP' or val > 3000:
+                                            return f"{val:.2f}"
                         except Exception:
                             continue
-
-                # 2. محاولة جلب السعر من خيارات العرض المباشرة
-                price_span = soup.select_one('.a-price .a-offscreen')
-                if price_span:
-                    p = clean_price(price_span.get_text())
-                    if p != "N/A":
-                        return p
 
         except Exception as e:
             print(f"Amazon Scrape Error: {e}")
@@ -99,7 +107,7 @@ def scrape_noon_special(url):
                         for p in match:
                             if p:
                                 price_clean = clean_price(p)
-                                if price_clean != "N/A":
+                                if price_clean != "N/A" and float(price_clean) > 0:
                                     return price_clean
 
                 selectors = ['[data-qa="product-price"]', '.priceNow', '.p-price', 'span.price']

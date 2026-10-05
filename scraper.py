@@ -2,14 +2,13 @@ import re
 import json
 import time
 import random
+import cloudscraper
 from bs4 import BeautifulSoup
-from curl_cffi import requests as curl_requests
 
 def clean_price(price_str):
-    if price_str is None or price_str == "":
+    if not price_str:
         return "N/A"
-    
-    text = str(price_str).replace(',', '').replace('\xa0', ' ')
+    text = str(price_str).replace(',', '').replace('\xa0', ' ').strip()
     match = re.search(r'\d+(?:\.\d+)?', text)
     if match:
         try:
@@ -21,139 +20,94 @@ def clean_price(price_str):
     return "N/A"
 
 def scrape_amazon(url):
-    # إضافة برامتر للجوالة والدولة في الرابط نفسه لمنع التحويل للدولار
-    clean_url = url.split('?')[0] + "?language=ar_AE&currency=EGP"
-
+    clean_url = url.split('?')[0]
+    
+    # استخدام cloudscraper لتجاوز حماية Bot Detection
+    scraper = cloudscraper.create_scraper(
+        browser={
+            'browser': 'chrome',
+            'platform': 'windows',
+            'desktop': True
+        }
+    )
+    
     headers = {
-        "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "accept-language": "ar-EG,ar;q=0.9,en-US;q=0.8",
-        "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
+        'Accept-Language': 'ar-EG,ar;q=0.9,en-US;q=0.8,en;q=0.7',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
     }
-
-    # ضبط كوكيز أمازون مصر إجبارياً
+    
     cookies = {
-        "i18n-prefs": "EGP",
-        "lc-main": "ar_AE",
-        "session-id-time": "2082787201l"
+        'i18n-prefs': 'EGP',
+        'lc-main': 'ar_AE',
     }
 
-    for attempt in range(3):
-        try:
-            time.sleep(random.uniform(1.0, 2.0))
-            session = curl_requests.Session(impersonate="chrome120")
-            res = session.get(clean_url, headers=headers, cookies=cookies, timeout=15)
+    try:
+        res = scraper.get(clean_url, headers=headers, cookies=cookies, timeout=15)
+        if res.status_code == 200:
+            soup = BeautifulSoup(res.text, 'html.parser')
             
-            if res.status_code == 200:
-                soup = BeautifulSoup(res.text, 'html.parser')
-                
-                # 1. البحث عن السعر داخل عناصر EGP المباشرة في الصفحة
-                price_elements = soup.select('.a-price .a-offscreen')
-                for elem in price_elements:
-                    txt = elem.get_text()
-                    # التأكد أن السعر بالجنيه أو رقم كبير منطقي
-                    p = clean_price(txt)
-                    if p != "N/A":
-                        val = float(p)
-                        # لو الرقم صغير جداً (زي 1500 في لابتوب) يبقى ده دولار اترفض!
-                        if 'جنيه' in txt or 'EGP' in txt or val > 3000:
-                            return f"{val:.2f}"
+            # 1. البحث المباشر في عنصر سعر الشراء الرئيسي المخصص لأمازون مصر
+            price_span = soup.find("span", {"class": "a-price-whole"})
+            if price_span:
+                fraction_span = soup.find("span", {"class": "a-price-fraction"})
+                whole = price_span.get_text().replace('.', '').replace(',', '').strip()
+                fraction = fraction_span.get_text().strip() if fraction_span else "00"
+                if whole.isdigit():
+                    return f"{float(whole + '.' + fraction):.2f}"
 
-                # 2. البحث في JSON-LD مع التأكد من العملة EGP
-                json_scripts = soup.find_all('script', type='application/ld+json')
-                for script in json_scripts:
-                    if script.string:
-                        try:
-                            data = json.loads(script.string)
-                            if isinstance(data, list): data = data[0]
-                            offers = data.get('offers')
-                            if offers:
-                                if isinstance(offers, list): offers = offers[0]
-                                currency = offers.get('priceCurrency', '')
-                                price = offers.get('price')
-                                if price:
-                                    p = clean_price(price)
-                                    if p != "N/A":
-                                        val = float(p)
-                                        if currency == 'EGP' or val > 3000:
-                                            return f"{val:.2f}"
-                        except Exception:
-                            continue
+            # 2. البحث عن a-offscreen السعر الرئيسي فقط وليس الشحن
+            core_price = soup.select_one('#corePrice_feature_div .a-offscreen, #corePriceDisplay_desktop_feature_div .a-offscreen')
+            if core_price:
+                p = clean_price(core_price.get_text())
+                if p != "N/A":
+                    return p
 
-        except Exception as e:
-            print(f"Amazon Scrape Error: {e}")
+            # 3. جلب السعر من البيانات المبسطة JSON-LD
+            for script in soup.find_all('script', type='application/ld+json'):
+                if script.string:
+                    try:
+                        data = json.loads(script.string)
+                        if isinstance(data, list): data = data[0]
+                        offers = data.get('offers')
+                        if offers:
+                            if isinstance(offers, list): offers = offers[0]
+                            price = offers.get('price')
+                            if price:
+                                p = clean_price(price)
+                                if p != "N/A":
+                                    return p
+                    except Exception:
+                        continue
+
+    except Exception as e:
+        print(f"Amazon Scrape Error: {e}")
 
     return "N/A"
 
 def scrape_noon_special(url):
-    headers = {
-        "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "accept-language": "ar-EG,ar;q=0.9",
-        "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
-
-    for attempt in range(3):
-        try:
-            time.sleep(random.uniform(1.0, 2.0))
-            session = curl_requests.Session(impersonate="chrome120")
-            response = session.get(url, headers=headers, timeout=15)
-            
-            if response.status_code == 200:
-                soup = BeautifulSoup(response.text, 'html.parser')
-                
-                next_data = soup.find('script', id='__NEXT_DATA__')
-                if next_data and next_data.string:
-                    price_matches = re.findall(r'"sale_price"\s*:\s*([\d\.]+)|"price"\s*:\s*([\d\.]+)', next_data.string)
-                    for match in price_matches:
-                        for p in match:
-                            if p:
-                                price_clean = clean_price(p)
-                                if price_clean != "N/A" and float(price_clean) > 0:
-                                    return price_clean
-
-                selectors = ['[data-qa="product-price"]', '.priceNow', '.p-price', 'span.price']
-                for sel in selectors:
-                    elem = soup.select_one(sel)
-                    if elem:
-                        p = clean_price(elem.get_text())
-                        if p != "N/A":
-                            return p
-
-        except Exception as e:
-            print(f"Noon Scrape Error: {e}")
-
-    return "N/A"
-
-def scrape_jumia(url):
-    headers = {"accept-language": "ar-EG,ar;q=0.9,en-US;q=0.8"}
-    for attempt in range(3):
-        try:
-            time.sleep(random.uniform(1.0, 2.0))
-            session = curl_requests.Session(impersonate="chrome120")
-            res = session.get(url, headers=headers, timeout=15)
-            
-            if res.status_code == 200:
-                soup = BeautifulSoup(res.text, 'html.parser')
-                selectors = ['span.-b.-ltr.-tal.-prsm', 'span.-b.-ltr.-tal.-fs24', '.prc']
-                for sel in selectors:
-                    elem = soup.select_one(sel)
-                    if elem:
-                        p = clean_price(elem.get_text())
-                        if p != "N/A":
-                            return p
-        except Exception as e:
-            print(f"Jumia Scrape Error: {e}")
-
+    scraper = cloudscraper.create_scraper()
+    headers = {'Accept-Language': 'ar-EG,ar;q=0.9'}
+    try:
+        res = scraper.get(url, headers=headers, timeout=15)
+        if res.status_code == 200:
+            soup = BeautifulSoup(res.text, 'html.parser')
+            next_data = soup.find('script', id='__NEXT_DATA__')
+            if next_data and next_data.string:
+                price_matches = re.findall(r'"sale_price"\s*:\s*([\d\.]+)|"price"\s*:\s*([\d\.]+)', next_data.string)
+                for match in price_matches:
+                    for p in match:
+                        if p and float(p) > 0:
+                            return clean_price(p)
+    except Exception as e:
+        print(f"Noon Scrape Error: {e}")
     return "N/A"
 
 def get_product_price(url):
     if not url or not isinstance(url, str):
         return "N/A"
-    
     u = url.lower()
     if 'noon' in u:
         return scrape_noon_special(url)
     elif 'amazon' in u:
         return scrape_amazon(url)
-    elif 'jumia' in u:
-        return scrape_jumia(url)
     return "N/A"

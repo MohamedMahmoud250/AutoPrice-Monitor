@@ -112,42 +112,71 @@ def scrape_amazon(url):
     return "N/A"
 
 def scrape_noon_special(url):
-    """جلب سعر منتج نون"""
+    """جلب سعر منتج نون بأسلوب استخراج متقدم لتجاوز الحظر"""
+    clean_url = url.split('?')[0]
+    
     headers = {
-        "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "accept-language": "ar-EG,ar;q=0.9",
-        "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "accept-language": "ar-EG,ar;q=0.9,en-US;q=0.8,en;q=0.7",
+        "cache-control": "no-cache",
+        "pragma": "no-cache",
+        "sec-ch-ua": '"Chromium";v="124", "Google Chrome";v="124"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"Windows"',
+        "sec-fetch-dest": "document",
+        "sec-fetch-mode": "navigate",
+        "sec-fetch-site": "none",
+        "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    }
+
+    cookies = {
+        "locale": "ar-eg",
+        "country": "eg"
     }
 
     for attempt in range(3):
         try:
-            time.sleep(random.uniform(1.0, 2.0))
+            time.sleep(random.uniform(1.0, 2.5))
             session = curl_requests.Session(impersonate="chrome120")
-            response = session.get(url, headers=headers, timeout=15)
+            response = session.get(clean_url, headers=headers, cookies=cookies, timeout=15)
             
             if response.status_code == 200:
                 soup = BeautifulSoup(response.text, 'html.parser')
                 
-                # جلب السعر من كود الـ NEXT_DATA الخاص بنون
+                # 1. البحث الشامل داخل سكريبت __NEXT_DATA__ بمختلف مفاتيح الأسعار
                 next_data = soup.find('script', id='__NEXT_DATA__')
                 if next_data and next_data.string:
-                    price_matches = re.findall(r'"sale_price"\s*:\s*([\d\.]+)|"price"\s*:\s*([\d\.]+)', next_data.string)
-                    for match in price_matches:
-                        for p in match:
+                    patterns = [
+                        r'"offer_price"\s*:\s*([\d\.]+)',
+                        r'"sale_price"\s*:\s*([\d\.]+)',
+                        r'"price"\s*:\s*([\d\.]+)',
+                        r'"price_egp"\s*:\s*([\d\.]+)'
+                    ]
+                    for pattern in patterns:
+                        matches = re.findall(pattern, next_data.string)
+                        for p in matches:
                             val = clean_price(p)
                             if val and val > 0:
                                 return f"{val:.2f}"
 
-                selectors = ['[data-qa="product-price"]', '.priceNow', '.p-price', 'span.price']
+                # 2. البحث داخل عناصر الـ HTML المباشرة
+                selectors = [
+                    '[data-qa="product-price"]',
+                    '.priceNow',
+                    '.p-price',
+                    'span.price',
+                    '.priceContainer .amount',
+                    '[class*="price"]'
+                ]
                 for sel in selectors:
-                    elem = soup.select_one(sel)
-                    if elem:
+                    elements = soup.select(sel)
+                    for elem in elements:
                         val = clean_price(elem.get_text())
-                        if val:
+                        if val and val > 0:
                             return f"{val:.2f}"
 
         except Exception as e:
-            print(f"Noon Scrape Error: {e}")
+            print(f"Noon Scrape Attempt {attempt+1} Error: {e}")
 
     return "N/A"
 
